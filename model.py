@@ -196,3 +196,39 @@ class Seq2Seq(nn.Module):
             trg_input = (trg_seq[:, t] if use_teacher_force else top1).unsqueeze(1)
             
         return outputs
+    
+    # model.py 파일의 Seq2Seq 클래스 내부에 이 함수를 추가하세요.
+
+    def predict(self, src_seq, max_output_len=50, sos_idx=1, eos_idx=2):
+        """ 학습된 모델로 실제 번역을 수행합니다. (Teacher Forcing 끔) """
+        self.eval() # 평가 모드로 설정
+        
+        batch_size = src_seq.shape[0]
+        if batch_size != 1:
+            raise ValueError("예측(predict) 시에는 batch_size를 1로 설정해야 합니다.")
+            
+        src_seq = src_seq.to(self.device)
+        
+        with torch.no_grad():
+            # 1. 인코더
+            encoder_outputs, hidden, cell = self.encoder(src_seq)
+            
+            # 2. 디코더
+            trg_input = torch.tensor([sos_idx], dtype=torch.long).unsqueeze(0).to(self.device) # <SOS>
+            
+            output_tokens = []
+            
+            for _ in range(max_output_len):
+                # 3. 어텐션 및 디코딩 (forward와 동일)
+                output, hidden, cell = self.decoder(trg_input, hidden, cell, encoder_outputs)
+                
+                # 4. 다음 단어 결정 (Greedy Search)
+                top1 = output.argmax(1) # 가장 확률이 높은 단어
+                
+                if top1.item() == eos_idx: # <EOS> 만나면 종료
+                    break
+                    
+                output_tokens.append(top1.item())
+                trg_input = top1.unsqueeze(1)
+                
+        return output_tokens
