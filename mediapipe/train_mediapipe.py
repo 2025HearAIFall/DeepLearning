@@ -274,20 +274,19 @@ if __name__ == '__main__':
         exit()
 
     total_size = len(full_dataset)
-    train_size = int(total_size * 0.7) # 약 116개
-    valid_size = total_size - train_size
-    test_size = total_size - train_size - valid_size 
+    train_size = int(total_size * 0.7) # 166개 기준 약 116개
+    valid_size = total_size - train_size      # 166개 기준 약 50개 (안정성 증가)
+
     generator = torch.Generator().manual_seed(42)
     train_dataset, valid_dataset = random_split(
         full_dataset, [train_size, valid_size], generator=generator
     )
-
-    test_dataset = valid_dataset # 임시로 test_dataset을 valid_dataset으로 설정
+    test_dataset = valid_dataset # 테스트는 검증 세트로 임시 대체
 
     print(f"총 데이터: {total_size}개")
-    print(f"분리된 학습 데이터 수: {len(train_dataset)} (80%)")
-    print(f"분리된 검증 데이터 수: {len(valid_dataset)} (10%)")
-    print(f"분리된 테스트 데이터 수: {len(test_dataset)} (10%)")
+    print(f"분리된 학습 데이터 수: {len(train_dataset)} (70%)")
+    print(f"분리된 검증 데이터 수: {len(valid_dataset)} (30%)")
+    print(f"분리된 테스트 데이터 수: {len(test_dataset)} (30%)")
     
     train_loader = DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
     valid_loader = DataLoader(dataset=valid_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
