@@ -23,8 +23,8 @@ INPUT_SIZE = (33 + 468 + 21 + 21) * 2 * 2 # 2172
 def augment_noise(keypoints_seq):
     """(train_from_npy.py에서 복사)
     키포인트 시퀀스에 미세한 노이즈(Jitter)를 추가합니다."""
-    # 표준편차 0.01의 노이즈 생성
-    noise = np.random.normal(0, 0.01, keypoints_seq.shape).astype(np.float32)
+    # 표준편차 0.005의 노이즈 생성
+    noise = np.random.normal(0, 0.005, keypoints_seq.shape).astype(np.float32)
     augmented_seq = keypoints_seq + noise
     return augmented_seq
 
@@ -85,4 +85,5 @@ if __name__ == '__main__':
     print("\n--- 오프라인 증강 완료 ---")
     print(f"총 {len(new_df)}개의 증강된 데이터 생성 완료.")
     print(f"NPY 폴더: '{OUTPUT_NPY_DIR}'")
+
     print(f"인덱스 파일: '{OUTPUT_INDEX_FILE}'")
