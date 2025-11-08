@@ -1,8 +1,8 @@
 # train_from_npy.py (Offline Augmentation 버전으로 개조됨)
 # -----------------------------------------------------------------------------
 # [목표]: 'all_index_npy.csv'를 읽어들인 직후,
-#         메모리 상에서 데이터를 30배로 증강시키고,
-#         30배가 된 데이터로 훈련을 시작합니다.
+#         메모리 상에서 데이터를 20배로 증강시키고,
+#         20배가 된 데이터로 훈련을 시작합니다.
 # -----------------------------------------------------------------------------
 
 import torch
@@ -21,7 +21,7 @@ import random
 
 # --- [사용자 설정] ---
 INPUT_INDEX_FILE = 'all_index_npy.csv'
-AUGMENTATION_FACTOR = 30 # 30배 증강
+AUGMENTATION_FACTOR = 20 # 20배 증강
 # ------------------------
 
 # --- 하이퍼파라미터 (전역 변수로 이동) ---
@@ -171,7 +171,7 @@ if __name__ == '__main__':
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     BATCH_SIZE = 32
     LEARNING_RATE = 0.0005  
-    NUM_EPOCHS = 30 
+    NUM_EPOCHS = 40 
     MAX_TARGET_LEN = 50
     HIDDEN_SIZE = 512
     NUM_LAYERS = 3
