@@ -1,14 +1,17 @@
-# train_from_npy.py (Offline Augmentation 버전으로 개조됨)
+# train_from_npy.py (최종: 검증/테스트는 원본만 사용 70:15:15)
 # -----------------------------------------------------------------------------
-# [목표]: 'all_index_npy.csv'를 읽어들인 직후,
-#         메모리 상에서 데이터를 15배로 증강시키고,
-#         15배가 된 데이터로 훈련을 시작합니다.
+# [목표]: 'all_index_augmented.csv'를 읽어 훈련을 수행합니다.
+# [수정]:
+# 1. Train Set = (원본 70%) + (증강본 100%)
+# 2. Valid Set = (원본 15%)
+# 3. Test Set  = (원본 15%)
 # -----------------------------------------------------------------------------
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split
+# [추가] ConcatDataset: 여러 데이터셋을 하나로 합칠 때 사용
+from torch.utils.data import Dataset, DataLoader, random_split, ConcatDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 import pandas as pd
@@ -19,9 +22,8 @@ import pickle
 import os 
 import random 
 
-# --- [사용자 설정] ---
-INPUT_INDEX_FILE = 'all_index_npy.csv'
-AUGMENTATION_FACTOR = 15 # 15배 증강
+# --- [수정된 설정] ---
+INPUT_INDEX_FILE = 'all_index_augmented.csv'
 # ------------------------
 
 # --- 하이퍼파라미터 (전역 변수로 이동) ---
@@ -64,23 +66,16 @@ class Vocabulary:
 class SignLanguageDataset_InMemory(Dataset):
     def __init__(self, data_list, max_target_len=50, vocab=None):
         self.max_target_len = max_target_len
-        # [개조] CSV가 아닌, (np.array, "문장") 튜플의 리스트를 직접 받음
         self.data_list = data_list 
         if vocab is None:
             raise ValueError("Vocabulary 객체가 제공되어야 합니다.")
         self.vocab = vocab
         
-        # [제거됨] is_train (실시간 증강 안 함)
-
     def __len__(self):
-        # [개조] data_info가 아닌 data_list의 길이 반환
         return len(self.data_list)
     
     def __getitem__(self, idx):
-        # [개조] CSV가 아닌 리스트에서 (텐서, 문장)을 바로 가져옴
         final_sequence, sentence_str = self.data_list[idx]
-
-        # 타겟 문장 처리 (기존과 동일)
         indices = self.vocab.numericalize(sentence_str)
         indices = [self.vocab.sos_idx] + indices + [self.vocab.eos_idx]
         if len(indices) < self.max_target_len:
@@ -88,15 +83,7 @@ class SignLanguageDataset_InMemory(Dataset):
         else:
             indices = indices[:self.max_target_len]
         target_tensor = torch.tensor(indices, dtype=torch.long)
-
         return torch.from_numpy(final_sequence), target_tensor
-
-# --- [개조] 증강 함수 (클래스 밖으로 이동) ---
-def augment_noise(keypoints_seq):
-    """키포인트 시퀀스에 미세한 노이즈(Jitter)를 추가합니다."""
-    noise = np.random.normal(0, 0.005, keypoints_seq.shape).astype(np.float32)
-    augmented_seq = keypoints_seq + noise
-    return augmented_seq
 
 # --------------------------------------------------
 # [모델 클래스 정의] (Encoder, Attention, Decoder, Seq2Seq)
@@ -169,87 +156,100 @@ if __name__ == '__main__':
     # --- 하이퍼파라미터 설정 ---
     # ... (이전과 동일) ...
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    BATCH_SIZE = 32
-    LEARNING_RATE = 0.0005  
+    BATCH_SIZE = 16
+    LEARNING_RATE = 0.0001
     NUM_EPOCHS = 40 
     MAX_TARGET_LEN = 50
-    HIDDEN_SIZE = 512
-    NUM_LAYERS = 3
+    HIDDEN_SIZE = 256
+    NUM_LAYERS = 2
     EMBED_SIZE = 256
-    DROPOUT_PROB = 0.6
+    DROPOUT_PROB = 0.7
     NUM_WORKERS = 0 
     PATIENCE = 10 
 
-    # --- [개조] 데이터 준비 및 Vocabulary 생성 ---
+    # --- [수정] 데이터 준비 및 Vocabulary 생성 ---
     print(f"'{INPUT_INDEX_FILE}' 로딩 및 Vocabulary 생성 (NPY용)...")
     try:
         all_df = pd.read_csv(INPUT_INDEX_FILE)
     except FileNotFoundError:
         print(f"[오류] '{INPUT_INDEX_FILE}' 파일을 찾을 수 없습니다.")
+        print(">>> 'augment_offline.py'를 먼저 실행해야 합니다.")
         exit()
 
+    # Vocab은 모든 문장(증강본 포함)으로 생성
     all_sentences = all_df['sentence'].tolist()
-
     vocab = Vocabulary(simple_tokenizer, min_freq=2)
     vocab.build_vocab(all_sentences)
     TARGET_VOCAB_SIZE = len(vocab)
     PAD_IDX = vocab.pad_idx
-
     print(f"생성된 Target Vocabulary 크기: {TARGET_VOCAB_SIZE}")
-    print(f"원본 데이터 수: {len(all_df)}개")
+    print(f"총 데이터 수 (증강됨): {len(all_df)}개")
 
-    # --- [신규] 오프라인(메모리) 증강 ---
-    print(f"{AUGMENTATION_FACTOR}배 오프라인 증강을 시작합니다... (메모리로 로드 중)")
+    # --- [수정] 원본 NPY와 증강 NPY를 분리하여 로드 ---
+    print(f"'{INPUT_INDEX_FILE}'의 NPY 파일들을 메모리로 로드합니다...")
     
-    augmented_data_list = []
+    original_data_list = []  # 원본 (_aug_0.npy)
+    augmented_only_list = [] # 증강본 (_aug_1 ~ _aug_14.npy)
     
-    for _, row in tqdm(all_df.iterrows(), total=len(all_df), desc="Augmenting"):
+    for _, row in tqdm(all_df.iterrows(), total=len(all_df), desc="Loading & Sorting NPY"):
         npy_path = row['npy_path']
         sentence = row['sentence']
         
         try:
-            original_sequence = np.load(npy_path)
+            sequence = np.load(npy_path)
+            
+            # 파일명 끝부분으로 원본/증강본 구분
+            if npy_path.endswith("_aug_0.npy"):
+                original_data_list.append((sequence, sentence))
+            else:
+                augmented_only_list.append((sequence, sentence))
+                
         except Exception as e:
             print(f"Warning: Cannot load npy file {npy_path}. Skipping. Error: {e}")
             continue
-            
-        # 1. 원본 1개 추가
-        augmented_data_list.append((original_sequence, sentence))
-        
-        # 2. (AUGMENTATION_FACTOR - 1) 만큼 증강하여 추가
-        for _ in range(AUGMENTATION_FACTOR - 1):
-            augmented_sequence = augment_noise(original_sequence)
-            augmented_data_list.append((augmented_sequence, sentence))
 
-    print(f"증강 완료. 총 데이터 수: {len(augmented_data_list)}개")
-    print("통합 데이터셋 생성 및 분할 (In-Memory)...")
+    print(f"로드 완료. 원본: {len(original_data_list)}개, 증강본: {len(augmented_only_list)}개")
+    print("데이터셋 생성 및 분할 (In-Memory)...")
 
     try:
-        # [개조] InMemory 데이터셋 클래스 사용
-        full_dataset = SignLanguageDataset_InMemory(
-            data_list=augmented_data_list, 
+        # 원본 데이터셋
+        original_dataset = SignLanguageDataset_InMemory(
+            data_list=original_data_list, 
+            max_target_len=MAX_TARGET_LEN,
+            vocab=vocab
+        )
+        # 증강 데이터셋
+        augmented_dataset = SignLanguageDataset_InMemory(
+            data_list=augmented_only_list,
             max_target_len=MAX_TARGET_LEN,
             vocab=vocab
         )
     except Exception as e:
-        print(f"데이터셋 로딩 중 오류 발생: {e}")
+        print(f"데이터셋 생성 중 오류 발생: {e}")
         exit()
 
-    # (데이터 분할 로직은 기존과 동일)
-    total_size = len(full_dataset) # 1560 (10배)
-    train_size = int(total_size * 0.8) # 약 1248
-    valid_size = int(total_size * 0.1) # 약 156
-    test_size = total_size - train_size - valid_size # 약 156
+    # --- [수정] 데이터 분할 (원본 데이터셋 기준 7:1.5:1.5) ---
+    total_size = len(original_dataset) 
+    train_size = int(total_size * 0.7)  # 70%
+    valid_size = int(total_size * 0.15) # 15%
+    
+    # 7:1.5:1.5 비율이 정확히 안 맞을 경우 test_size가 남은 부분을 모두 가져감
+    test_size = total_size - train_size - valid_size # 15%
 
     generator = torch.Generator().manual_seed(42)
-    train_dataset, valid_dataset, test_dataset = random_split(
-        full_dataset, [train_size, valid_size, test_size], generator=generator
+    
+    # 원본(Original) 데이터셋을 7:1.5:1.5로 분할
+    train_orig_dataset, valid_dataset, test_dataset = random_split(
+        original_dataset, [train_size, valid_size, test_size], generator=generator
     )
 
-    print(f"총 데이터: {total_size}개")
-    print(f"분리된 학습 데이터 수: {len(train_dataset)} ({train_size})")
-    print(f"분리된 검증 데이터 수: {len(valid_dataset)} ({valid_size})")
-    print(f"분리된 테스트 데이터 수: {len(test_dataset)} ({test_size})")
+    # [수정] 최종 학습 데이터셋 = (원본 70%) + (증강본 100%)
+    train_dataset = ConcatDataset([train_orig_dataset, augmented_dataset])
+
+    print("\n--- 데이터 분할 완료 ---")
+    print(f"총 학습 데이터 수: {len(train_dataset)} (원본 {len(train_orig_dataset)} + 증강 {len(augmented_dataset)})")
+    print(f"총 검증 데이터 수: {len(valid_dataset)} (순수 원본)")
+    print(f"총 테스트 데이터 수: {len(test_dataset)} (순수 원본)")
 
     train_loader = DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
     valid_loader = DataLoader(dataset=valid_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
@@ -268,8 +268,7 @@ if __name__ == '__main__':
     best_model_path = 'model_a_mediapipe_best.pth'
 
     # --- 모델 학습 시작 ---
-    print(f"\nSeq2Seq (Offline Augmented NPY) 모델 학습을 시작합니다... (DEVICE: {DEVICE})")
-    print(f"Epoch 당 배치 수: {len(train_loader)} (이전 4/4에서 증가 확인)")
+    print(f"\nSeq2Seq (Pre-Augmented NPY) 모델 학습을 시작합니다... (DEVICE: {DEVICE})")
     
     for epoch in range(NUM_EPOCHS):
         model.train()
@@ -289,7 +288,7 @@ if __name__ == '__main__':
             optimizer.step()
             train_loss += loss.item()
 
-        # --- 검증 ---
+        # --- 검증 (순수 원본 데이터) ---
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -330,7 +329,7 @@ if __name__ == '__main__':
 
     print("\n학습 완료!")
 
-    # --- 최종 모델 테스트 ---
+    # --- 최종 모델 테스트 (순수 원본 데이터) ---
     print(f"\n최고 성능의 모델({best_model_path})을 로드하여 최종 테스트를 진행합니다...")
     try:
         model.load_state_dict(torch.load(best_model_path))
