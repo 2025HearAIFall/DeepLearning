@@ -1,7 +1,7 @@
 # augment_offline.py
 # -----------------------------------------------------------------------------
 # [목표]: 'all_index_npy.csv'에 있는 .npy 파일을
-#         15배로 증강하여 'npy_data_augmented' 폴더에 저장합니다.
+#         10배로 증강하여 'npy_data_augmented' 폴더에 저장합니다.
 # -----------------------------------------------------------------------------
 
 import numpy as np
@@ -13,7 +13,7 @@ from tqdm import tqdm
 INPUT_INDEX_FILE = 'all_index_npy.csv'
 OUTPUT_INDEX_FILE = 'all_index_augmented.csv'
 OUTPUT_NPY_DIR = 'npy_data_augmented'
-AUGMENTATION_FACTOR = 15 # 15배 증강
+AUGMENTATION_FACTOR = 10 # 10배 증강
 # ------------------------
 
 # --- [설정값] (train_from_npy.py와 동일) ---
@@ -23,8 +23,8 @@ INPUT_SIZE = (33 + 21 + 21) * 2 * 2 # 300
 def augment_noise(keypoints_seq):
     """(train_from_npy.py에서 복사)
     키포인트 시퀀스에 미세한 노이즈(Jitter)를 추가합니다."""
-    # 표준편차 0.005의 노이즈 생성
-    noise = np.random.normal(0, 0.005, keypoints_seq.shape).astype(np.float32)
+    # 표준편차 0.003의 노이즈 생성
+    noise = np.random.normal(0, 0.003, keypoints_seq.shape).astype(np.float32)
     augmented_seq = keypoints_seq + noise
     return augmented_seq
 
@@ -65,7 +65,7 @@ if __name__ == '__main__':
         np.save(new_path_original, original_sequence)
         new_data.append({'npy_path': new_path_original, 'sentence': sentence})
 
-        # (2-2) 14개 추가 증강 (총 15개)
+        # (2-2) 9개 추가 증강 (총 10개)
         for i in range(1, AUGMENTATION_FACTOR):
             # 3. 노이즈 주입
             augmented_sequence = augment_noise(original_sequence)
