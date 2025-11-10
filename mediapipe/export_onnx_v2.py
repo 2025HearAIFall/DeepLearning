@@ -29,10 +29,10 @@ ONNX_DECODER_PATH = 'model_a_v2_decoder.onnx'
 
 # [모델 하이퍼파라미터] (train_from_npy.py와 동일하게 설정)
 INPUT_SIZE = (33 + 21 + 21) * 2 * 2 # 300
-HIDDEN_SIZE = 512
-NUM_LAYERS = 3
+HIDDEN_SIZE = 256
+NUM_LAYERS = 2
 EMBED_SIZE = 256
-DROPOUT_PROB = 0.6
+DROPOUT_PROB = 0.7
 MAX_LEN = 30 # Encoder의 더미 입력 시퀀스 길이
 DEVICE = "cpu" # ONNX 변환은 CPU로 진행
 
