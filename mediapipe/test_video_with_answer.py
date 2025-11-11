@@ -21,8 +21,8 @@ import json
 from pathlib import Path
 
 # --- [사용자 설정] ---
-VIDEO_FILENAME = "37번.mp4" 
-GROUND_TRUTH_JSON = "NIA_SL_SEN0037_REAL01_F_morpheme.json" 
+VIDEO_FILENAME = "NIA_SL_SEN0142_REAL01_F.mp4" 
+GROUND_TRUTH_JSON = "NIA_SL_SEN0142_REAL01_F_morpheme.json" 
 # ------------------------
 
 
@@ -194,9 +194,12 @@ def onnx_predict_realtime(encoder_sess, decoder_sess, src_seq_np):
 # -----------------------------------------------------------------------------
 # [수정] 파이프라인 A (슬라이딩 윈도우로 변경)
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# [수정] 파이프라인 A (학습 방식과 동일하게 '전체 샘플링 1회' 예측)
+# -----------------------------------------------------------------------------
 def run_whole_video_inference_A(GROUND_TRUTH_SENTENCE):
     print("\n" + "="*30)
-    print(f"--- 🚀 파이프라인 A (슬라이딩 윈도우 분석) 시작 ---")
+    print(f"--- 🚀 파이프라인 A (비디오 전체 샘플링 후 1회 예측) 시작 ---")
     print(f"파일: {VIDEO_FILE_PATH}")
     print("="*30)
 
@@ -206,12 +209,11 @@ def run_whole_video_inference_A(GROUND_TRUTH_SENTENCE):
 
     cap = cv2.VideoCapture(VIDEO_FILE_PATH)
     
-    # [수정] 30프레임 큐 (슬라이딩 윈도우)
-    keypoint_queue = deque(maxlen=MAX_LEN_A)
-    all_display_frames = []  # 재생할 원본 프레임 저장용
-    all_predictions = []     # 각 프레임 시점의 예측 결과 저장용
+    # [수정] 큐(deque) 대신, 모든 프레임과 키포인트를 저장할 리스트
+    all_display_frames = []
+    all_keypoints_list = []
 
-    print("--- 1단계: 동영상 전체 프레임 분석 중... ---")
+    print("--- 1단계: 동영상 전체 프레임 '수집' 중... ---")
     frame_count = 0
     while cap.isOpened():
         success, frame = cap.read()
@@ -220,60 +222,78 @@ def run_whole_video_inference_A(GROUND_TRUTH_SENTENCE):
         frame_count += 1
         all_display_frames.append(frame.copy()) 
         
-        # 1. 키포인트 추출 및 큐에 추가
+        # 1. 키포인트 추출 후 리스트에 저장
         keypoints = _extract_keypoints_from_frame(frame, holistic)
-        keypoint_queue.append(keypoints) # (150,)
-
-        # [수정] 큐가 30개 찰 때까지 기다림
-        if len(keypoint_queue) < MAX_LEN_A:
-            all_predictions.append("") # 예측 아직 안함
-            continue
-
-        # [수정] 큐가 30개가 되면 (30프레임부터) 예측 시작
-        sequence = np.array(keypoint_queue, dtype=np.float32) # (30, 150)
-        positions = sequence
-        motions = np.zeros_like(positions)
-        if len(positions) > 1:
-            motions[1:] = positions[1:] - positions[:-1]
-        
-        final_sequence = np.concatenate([positions, motions], axis=1)  # (30, 300)
-        final_sequence_batch = np.expand_dims(final_sequence, axis=0) # (1, 30, 300)
-
-        # 모델 예측
-        predicted_indices = onnx_predict_realtime(
-            encoder_session, decoder_session, final_sequence_batch
-        )
-        raw_tokens = [vocab.itos.get(idx, "<UNK>") for idx in predicted_indices]
-        final_sentence = " ".join(raw_tokens)
-        
-        # 현재 프레임(frame_count)의 예측 결과를 저장
-        all_predictions.append(final_sentence)
-        
-        if frame_count % 30 == 0:
-             print(f"  ... {frame_count} 프레임 분석: {final_sentence}")
+        all_keypoints_list.append(keypoints) # (150,)
 
     cap.release()
     holistic.close()
     
-    if not all_display_frames:
+    if not all_keypoints_list:
         print("[경고] 분석된 프레임이 없습니다.")
         return
-    print(f"--- 1단계: 분석 완료 (총 {frame_count} 프레임) ---")
+        
+    print(f"--- 1단계: 수집 완료 (총 {frame_count} 프레임) ---")
 
 
-    # --- [4단계: 재생 (정답 vs 예측)] ---
-    print("--- 2단계: 분석 결과 재생 시작... ('q' 키로 종료) ---")
+    # --- [수정] 2단계: '단 한 번'의 예측을 위한 30프레임 샘플링 ---
+    print(f"--- 2단계: {frame_count}개 프레임을 30개로 샘플링하여 '단 1회' 예측... ---")
+    
+    num_frames = len(all_keypoints_list)
+    sampled_features = []
+
+    if num_frames > MAX_LEN_A:
+        # [중요] train_mediapipe.py의 샘플링 로직과 동일하게
+        # (예: 100프레임 -> 30프레임으로 균등하게 샘플링)
+        indices = np.linspace(0, num_frames - 1, MAX_LEN_A, dtype=int)
+        sampled_features = [all_keypoints_list[i] for i in indices]
+    else:
+        # 30프레임보다 짧으면 그냥 사용
+        sampled_features = all_keypoints_list
+        
+    # (Keypoints 150D -> Input 300D)
+    sequence = np.array(sampled_features, dtype=np.float32) # (<=30, 150)
+    
+    # 패딩 (30프레임보다 짧은 비디오 대응)
+    if sequence.shape[0] < MAX_LEN_A:
+        padding_shape = (MAX_LEN_A - sequence.shape[0], sequence.shape[1])
+        padding = np.zeros(padding_shape, dtype=np.float32)
+        sequence = np.vstack([sequence, padding]) # (30, 150)
+
+    # 모션 벡터 생성
+    positions = sequence # (30, 150)
+    motions = np.zeros_like(positions) # (30, 150)
+    if len(positions) > 1:
+        motions[1:] = positions[1:] - positions[:-1]
+    
+    final_sequence = np.concatenate([positions, motions], axis=1)  # (30, 300)
+    final_sequence_batch = np.expand_dims(final_sequence, axis=0) # (1, 30, 300)
+
+    # [중요] 비디오 전체에 대해 '단 1회' 예측 수행
+    predicted_indices = onnx_predict_realtime(
+        encoder_session, decoder_session, final_sequence_batch
+    )
+    raw_tokens = [vocab.itos.get(idx, "<UNK>") for idx in predicted_indices]
+    
+    # 이것이 최종 1회 예측 결과입니다.
+    final_prediction_one_shot = " ".join(raw_tokens)
+    
+    print(f"--- [최종 예측 결과 (1-Shot)]: {final_prediction_one_shot} ---")
+
+
+    # --- [수정] 3단계: 재생 (정답 vs 최종 예측 1개) ---
+    print("--- 3단계: 분석 결과 재생 시작... ('q' 키로 종료) ---")
     
     color_correct = (0, 255, 0) # 초록색 (정답)
     color_model = (0, 255, 255) # 노란색 (모델)
     font_size = 1.0
     font_thickness = 2
     
-    # [수정] 0번 프레임부터 재생
+    # 0번 프레임부터 재생
     for i, frame in enumerate(all_display_frames):
         
-        # [수정] 현재 프레임(i)에 해당하는 예측값을 가져옴
-        current_sentence = all_predictions[i]
+        # [수정] 매번 바뀌는 예측값이 아닌, 위에서 확정된 '최종 예측' 변수를 사용합니다.
+        current_sentence = final_prediction_one_shot
         
         # 1. 정답 표시
         cv2.putText(frame, 
@@ -284,7 +304,7 @@ def run_whole_video_inference_A(GROUND_TRUTH_SENTENCE):
                     color_correct, 
                     font_thickness)
         
-        # 2. 모델 예측 표시 (슬라이딩 윈도우 결과)
+        # 2. 모델 예측 표시 (고정된 최종 결과)
         cv2.putText(frame, 
                     f"Model: {current_sentence}", 
                     (20, 90), 
@@ -299,7 +319,7 @@ def run_whole_video_inference_A(GROUND_TRUTH_SENTENCE):
             break
 
     cv2.destroyAllWindows()
-    print("--- 2단계: 재생 완료 ---")
+    print("--- 3단계: 재생 완료 ---")
 
 # =============================================================================
 # 메인 실행 블록
