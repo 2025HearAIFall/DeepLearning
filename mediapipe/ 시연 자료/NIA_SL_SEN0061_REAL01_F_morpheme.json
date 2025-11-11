@@ -1,0 +1,37 @@
+{
+    "metaData": {
+        "url": "https://blackolivevideo.blob.core.windows.net/sign-language/1029_bkyu0232/NIA_SL_SEN0061_REAL01_F.mp4",
+        "name": "NIA_SL_SEN0061_REAL01_F.mp4",
+        "duration": 4.75,
+        "exportedOn": "2020/12/10"
+    },
+    "data": [
+        {
+            "start": 1.306,
+            "end": 1.806,
+            "attributes": [
+                {
+                    "name": "돈"
+                }
+            ]
+        },
+        {
+            "start": 1.892,
+            "end": 2.392,
+            "attributes": [
+                {
+                    "name": "계산"
+                }
+            ]
+        },
+        {
+            "start": 2.552,
+            "end": 3.673,
+            "attributes": [
+                {
+                    "name": "잘못하다"
+                }
+            ]
+        }
+    ]
+}
