@@ -1,5 +1,5 @@
 # ======================================================
-# Hand Bridge Flask Server (5초 녹화 + GRU 모델 호환)
+# Hand Bridge Flask Server (NameError FIX)
 # ======================================================
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -9,10 +9,14 @@ from PIL import Image
 import numpy as np
 import builtins
 from collections import deque
+import mediapipe as mp # <-- 🔥 FIX: mediapipe import를 최상단으로 이동!
 
 # ------------------------------------------------------
-# 1. Vocab & Tokenizer (Pickle 로딩 필수)
+# 1. Path & Vocab Setup
 # ------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'frontend'))
+
 class Vocabulary:
     def __init__(self, tokenizer=None, min_freq=2):
         self.tokenizer = tokenizer; self.itos = {}; self.stoi = {}
@@ -25,7 +29,7 @@ builtins.Vocabulary = Vocabulary
 builtins.simple_tokenizer = simple_tokenizer
 
 # ------------------------------------------------------
-# 2. 모델 Import (수정된 inference.py 사용)
+# 2. Load Models
 # ------------------------------------------------------
 from inference import (
     vocab, encoder_session, decoder_session,          
@@ -34,39 +38,40 @@ from inference import (
 )
 
 # ------------------------------------------------------
-# 3. MediaPipe 설정
+# 3. MediaPipe Setup (NameError FIX 적용)
 # ------------------------------------------------------
-import mediapipe as mp
-mp_holistic = mp.solutions.holistic
+mp_holistic = mp.solutions.holistic # mp가 이미 import되었으므로 사용 가능
+
 try:
     holistic_processor = mp_holistic.Holistic(
+        static_image_mode=True, 
+        model_complexity=1,
         min_detection_confidence=0.5, 
         min_tracking_confidence=0.5
     )
-    print("✅ [app] MediaPipe 로드 완료")
-except:
+    print("✅ [app] MediaPipe loaded (Static Mode)")
+except Exception as e:
     holistic_processor = None
+    print(f"❌ [app] MediaPipe failed: {e}")
 
 # ------------------------------------------------------
-# 4. 서버 설정
+# 4. Server Config
 # ------------------------------------------------------
 app = Flask(__name__)
 CORS(app)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'frontend'))
 
-# 🔥 [핵심 설정] 5초 녹화 (30FPS * 5초 = 150프레임)
-TARGET_FRAMES = 150  
-MODEL_INPUT_LEN = 30 # 모델 입력 길이
-server_buffer = []   # 프레임 저장소
+TARGET_FRAMES = 50  
+MODEL_INPUT_LEN = 30 
+server_buffer = []   
 
 # ------------------------------------------------------
-# 5. 유틸리티 (전처리 & 압축)
+# 5. Utilities
 # ------------------------------------------------------
 def _extract_kps(frame_bgr, holistic):
     if not holistic: return np.zeros(150, dtype=np.float32)
-    img = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    
+    img = cv2.cvtColor(frame_bgr, cv2.COLOR_RGB2BGR)
     res = holistic.process(img)
     
     pose = np.zeros(66, dtype=np.float32)
@@ -80,25 +85,22 @@ def _extract_kps(frame_bgr, holistic):
         for i, lm in enumerate(res.right_hand_landmarks.landmark): rh[i*2], rh[i*2+1] = lm.x, lm.y
         
     kps = np.concatenate([pose, lh, rh])
-    # 감지 실패 시 0으로 채움 (녹화 시간 유지를 위해)
     if np.sum(np.abs(kps)) < 0.01: return np.zeros(150, dtype=np.float32)
     return kps
 
 def _resample(buffer, target_len=30):
-    """150개 프레임을 30개로 균일 압축"""
     arr = np.array(buffer, dtype=np.float32)
     if len(arr) == 0: return np.zeros((target_len, 150), dtype=np.float32)
     indices = np.linspace(0, len(arr)-1, target_len, dtype=int)
     return arr[indices]
 
 def _prepare(arr):
-    """Motion Feature 추가 (30,150) -> (1,30,300)"""
     mot = np.zeros_like(arr)
     if len(arr) > 1: mot[1:] = arr[1:] - arr[:-1]
     return np.expand_dims(np.concatenate([arr, mot], axis=1), axis=0)
 
 # ------------------------------------------------------
-# 6. API 라우트
+# 6. Routes
 # ------------------------------------------------------
 @app.route('/')
 def serve_index(): return send_from_directory(FRONTEND_DIR, 'index.html')
@@ -111,7 +113,7 @@ def serve_assets(filename): return send_from_directory(os.path.join(FRONTEND_DIR
 def reset():
     global server_buffer
     server_buffer = []
-    print("🔄 버퍼 리셋됨")
+    print("🔄 Buffer reset")
     return jsonify({"msg": "reset_ok"})
 
 @app.route("/api/sign_infer", methods=["POST"])
@@ -121,48 +123,33 @@ def sign_infer():
         data = request.get_json(force=True, silent=True)
         if not data or "frame" not in data: return jsonify({"error": "No frame"}), 400
 
-        # 이미지 디코딩
         f_b64 = data["frame"].split(",")[1] if "," in data["frame"] else data["frame"]
         img = Image.open(io.BytesIO(base64.b64decode(f_b64))).convert("RGB")
+        
         kps = _extract_kps(cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR), holistic_processor)
         
         server_buffer.append(kps)
         curr = len(server_buffer)
         progress = int((curr / TARGET_FRAMES) * 100)
 
-        # 1. 녹화 중 (5초 미만)
         if curr < TARGET_FRAMES:
-            msg = f"📸 녹화 중... ({progress}%)"
-            if progress > 80: msg = "🟠 분석 준비 중..."
+            msg = f"📸 Recording... ({progress}%)"
             return jsonify({"status": "recording", "progress": progress, "message": msg})
 
-        # ========================================================
-        # 2. 5초 녹화 완료 -> 분석 시작
-        # ========================================================
-        print("✅ 5초 데이터 확보! 분석 시작...")
+        print("✅ 5s Data Collected! Analyzing...")
         
-        # (1) 데이터 압축 (150 -> 30) 및 전처리
         resampled = _resample(server_buffer)
-        inp = _prepare(resampled) # (1, 30, 300)
+        inp = _prepare(resampled)
         
         raw_text = "..."
-        
-        # (2) 추론 (inference.py의 onnx_predict 호출)
         if encoder_session and vocab:
             sos_id = vocab.stoi.get("<SOS>", 1)
             eos_id = vocab.stoi.get("<EOS>", 2)
             
-            # GRU 호환된 함수 호출 (Cell State 필요 없음)
-            pred_idx = onnx_predict(
-                encoder_session, decoder_session, inp, 
-                max_output_len=50, sos_idx=sos_id, eos_idx=eos_id
-            )
-            
+            pred_idx = onnx_predict(encoder_session, decoder_session, inp, 50, sos_id, eos_id)
             tokens = [vocab.itos.get(i, "") for i in pred_idx]
-            # 특수 토큰 제거하고 원본 라벨 그대로 출력
             raw_text = " ".join([t for t in tokens if t not in ["<SOS>", "<PAD>", "<EOS>"]]).strip()
 
-        # (3) 문맥 교정 (선택 사항)
         corrected_text = raw_text
         if gec_model and raw_text:
             try:
@@ -171,15 +158,14 @@ def sign_infer():
                 corrected_text = gec_tokenizer.decode(out_g[0], skip_special_tokens=True)
             except: pass
 
-        server_buffer = [] # 버퍼 초기화
-        
-        print(f"👉 예측 결과: {raw_text}")
+        server_buffer = [] 
+        print(f"👉 Result: {raw_text}")
         
         return jsonify({
             "status": "done", 
             "progress": 100, 
-            "translation": raw_text,       # 학습 라벨 그대로
-            "corrected": corrected_text    # 문법 교정본
+            "translation": raw_text,
+            "corrected": corrected_text
         })
 
     except Exception as e:
@@ -187,7 +173,6 @@ def sign_infer():
         server_buffer = []
         return jsonify({"error": str(e)}), 500
 
-# 음성 API
 @app.route("/api/voice_infer", methods=["POST"])
 def voice_infer():
     try:
@@ -210,5 +195,5 @@ def voice_infer():
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    print(f"\n🚀 서버 실행 중 (5초 녹화 + GRU 모델)")
+    print(f"\n🚀 Server running (Final Fixes Applied)")
     app.run(host="0.0.0.0", port=8000)
