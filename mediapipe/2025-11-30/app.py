@@ -66,7 +66,7 @@ MODEL_INPUT_LEN = 30
 server_buffer = []   
 
 # ------------------------------------------------------
-# 5. Utilities
+# 5. Utilities (기존 유지)
 # ------------------------------------------------------
 def _extract_kps(frame_bgr, holistic):
     if not holistic: return np.zeros(150, dtype=np.float32)
@@ -178,21 +178,36 @@ def voice_infer():
     try:
         file = request.files.get("audio")
         if not file: return jsonify({"error": "No audio"}), 400
-        save_path = os.path.join(BASE_DIR, "temp_audio.wav")
+        
+        # -----------------------------------------------------
+        # 수정됨: 브라우저에서 보낸 파일명(확장자 .webm 예상)을 사용하여 저장
+        # -----------------------------------------------------
+        filename = file.filename if file.filename else "temp_audio.webm"
+        save_path = os.path.join(BASE_DIR, filename)
+        
         file.save(save_path)
+        print(f"🎤 Audio saved to: {save_path}")
         
         rec_text = ""
         if stt_model:
+            # Whisper 모델이 .webm 파일을 처리할 수 있도록 가정
             res = stt_model.transcribe(save_path, language="ko")
             rec_text = res.get("text", "").strip()
             
         emotion = "neutral"
         if emo: 
-            emotion, conf, _ = emo.infer_from_file(save_path)
+            try:
+                emotion, conf, _ = emo.infer_from_file(save_path)
+            except Exception as e:
+                print(f"⚠️ Emotion inference failed: {e}")
+                emotion = "neutral"
             
         if os.path.exists(save_path): os.remove(save_path)
+        
         return jsonify({"recognized_text": rec_text, "emotion": emotion})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    except Exception as e: 
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     print(f"\n🚀 Server running (Final Fixes Applied)")
